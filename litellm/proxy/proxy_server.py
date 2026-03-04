@@ -4411,6 +4411,9 @@ class ProxyConfig:
         if self._should_load_db_object(object_type="search_tools"):
             await self._init_search_tools_in_db(prisma_client=prisma_client)
 
+        if self._should_load_db_object(object_type="tools"):
+            await self._init_tool_policy_in_db(prisma_client=prisma_client)
+
         if self._should_load_db_object(object_type="model_cost_map"):
             await self._check_and_reload_model_cost_map(prisma_client=prisma_client)
 
@@ -4635,7 +4638,7 @@ class ProxyConfig:
                                 }
                             ),
                         },
-                        "update": {"param_value": safe_dumps({"force_reload": False})},
+                        "update": {"param_value": safe_dumps({"interval_hours": interval_hours, "force_reload": False})},
                     },
                 )
 
@@ -4736,7 +4739,7 @@ class ProxyConfig:
                                 }
                             ),
                         },
-                        "update": {"param_value": safe_dumps({"force_reload": False})},
+                        "update": {"param_value": safe_dumps({"interval_hours": interval_hours, "force_reload": False})},
                     },
                 )
 
@@ -4843,6 +4846,24 @@ class ProxyConfig:
         except Exception as e:
             verbose_proxy_logger.exception(
                 "litellm.proxy.proxy_server.py::ProxyConfig:_init_policies_in_db - {}".format(
+                    str(e)
+                )
+            )
+
+    async def _init_tool_policy_in_db(self, prisma_client: PrismaClient):
+        """
+        Initialize tool policy from database into the in-memory registry.
+        Synced periodically by add_deployment -> _init_non_llm_objects_in_db.
+        """
+        from litellm.proxy.db.tool_registry_writer import get_tool_policy_registry
+
+        try:
+            registry = get_tool_policy_registry()
+            await registry.sync_tool_policy_from_db(prisma_client=prisma_client)
+            verbose_proxy_logger.debug("Successfully synced tool policy from DB")
+        except Exception as e:
+            verbose_proxy_logger.exception(
+                "litellm.proxy.proxy_server.py::ProxyConfig:_init_tool_policy_in_db - {}".format(
                     str(e)
                 )
             )
@@ -8389,6 +8410,8 @@ async def token_counter(request: TokenCountRequest, call_endpoint: bool = False)
     prompt = request.prompt
     messages = request.messages
     contents = request.contents
+    tools = request.tools
+    system = request.system
 
     #########################################################
     # Validate request
@@ -8449,6 +8472,8 @@ async def token_counter(request: TokenCountRequest, call_endpoint: bool = False)
                 contents=contents,
                 deployment=deployment,
                 request_model=request.model,
+                tools=tools,
+                system=system,
             )
             #########################################################
             # Transfrom the Response to the well known format
@@ -10573,6 +10598,12 @@ async def async_queue_request(
         data["metadata"]["user_api_key_team_id"] = getattr(
             user_api_key_dict, "team_id", None
         )
+        data["metadata"]["user_api_key_object_permission_id"] = getattr(
+            user_api_key_dict, "object_permission_id", None
+        )
+        data["metadata"]["user_api_key_team_object_permission_id"] = getattr(
+            user_api_key_dict, "team_object_permission_id", None
+        )
         data["metadata"]["endpoint"] = str(request.url)
 
         global user_temperature, user_request_timeout, user_max_tokens, user_api_base
@@ -11089,9 +11120,7 @@ async def get_favicon():
 
     if favicon_url.startswith(("http://", "https://")):
         try:
-            from litellm.llms.custom_httpx.http_handler import (
-                get_async_httpx_client,
-            )
+            from litellm.llms.custom_httpx.http_handler import get_async_httpx_client
             from litellm.types.llms.custom_http import httpxSpecialProvider
 
             async_client = get_async_httpx_client(
@@ -12261,7 +12290,14 @@ async def reload_model_cost_map(
         current_time = datetime.utcnow()
         last_model_cost_map_reload = current_time.isoformat()
 
-        # Set force reload flag in database for other pods
+        # Set force reload flag in database for other pods, preserving existing interval_hours
+        existing_config = await prisma_client.db.litellm_config.find_unique(
+            where={"param_name": "model_cost_map_reload_config"}
+        )
+        existing_interval = None
+        if existing_config and existing_config.param_value:
+            existing_interval = existing_config.param_value.get("interval_hours")
+
         await prisma_client.db.litellm_config.upsert(
             where={"param_name": "model_cost_map_reload_config"},
             data={
@@ -12271,7 +12307,7 @@ async def reload_model_cost_map(
                         {"interval_hours": None, "force_reload": True}
                     ),
                 },
-                "update": {"param_value": safe_dumps({"force_reload": True})},
+                "update": {"param_value": safe_dumps({"interval_hours": existing_interval, "force_reload": True})},
             },
         )
 
@@ -12600,7 +12636,14 @@ async def reload_anthropic_beta_headers(
         current_time = datetime.utcnow()
         last_anthropic_beta_headers_reload = current_time.isoformat()
 
-        # Set force reload flag in database for other pods
+        # Set force reload flag in database for other pods, preserving existing interval_hours
+        existing_beta_config = await prisma_client.db.litellm_config.find_unique(
+            where={"param_name": "anthropic_beta_headers_reload_config"}
+        )
+        existing_beta_interval = None
+        if existing_beta_config and existing_beta_config.param_value:
+            existing_beta_interval = existing_beta_config.param_value.get("interval_hours")
+
         await prisma_client.db.litellm_config.upsert(
             where={"param_name": "anthropic_beta_headers_reload_config"},
             data={
@@ -12610,7 +12653,7 @@ async def reload_anthropic_beta_headers(
                         {"interval_hours": None, "force_reload": True}
                     ),
                 },
-                "update": {"param_value": safe_dumps({"force_reload": True})},
+                "update": {"param_value": safe_dumps({"interval_hours": existing_beta_interval, "force_reload": True})},
             },
         )
 
